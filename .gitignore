@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Per-user settings written by the app (each person gets their own)
+settings.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
