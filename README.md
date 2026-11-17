@@ -9,7 +9,8 @@ No third-party packages - just Python's standard library.
 - **Manual mode** - clicks repeatedly while you hold your real mouse button.
 - Adjustable speed from 1 to 100 clicks per second (slider or type a number).
 - Left, right or middle button.
-- Remembers your last mode, speed and button.
+- Dark and light themes (button at the top of the window; starts with your Windows setting).
+- Remembers your last mode, speed, button and theme.
 - Never clicks its own window. Moving the pointer to the top-left screen corner stops clicking.
 
 ## Quick install (Windows 10 / 11)

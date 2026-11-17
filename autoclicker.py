@@ -52,6 +52,7 @@ class State:
     cps = 10
     mode = "toggle"  # or "hold"
     button = "left"
+    theme = "light"  # or "dark"
     ui_hwnd = 0
     saved = None  # last settings written to disk
     # Physical (real, not injected) mouse button state, kept by the mouse hook
@@ -61,8 +62,42 @@ class State:
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 
+THEMES = {
+    "light": dict(bg="#f3f3f3", fg="#1b1b1b", field="#ffffff", border="#b8b8b8",
+                  hint="#5a5a5a", accent="#2b7de9", btn="#e4e4e4", btn_hover="#d4d4d4"),
+    "dark": dict(bg="#1f1f1f", fg="#e8e8e8", field="#2d2d2d", border="#4d4d4d",
+                 hint="#a0a0a0", accent="#4c9aff", btn="#363636", btn_hover="#444444"),
+}
+
+
+def system_theme():
+    """Windows' own light/dark app setting (used the first time, before you choose)."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if light else "dark"
+    except OSError:
+        return "light"
+
+
+def set_titlebar_dark(hwnd, dark):
+    """Dark title bar on Windows 10 (build 18985+) / 11. Silently skipped if unsupported."""
+    try:
+        value = ctypes.c_int(1 if dark else 0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+        # nudge Windows to repaint the frame (no move / resize / z-order change)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x37)
+    except (OSError, AttributeError):
+        pass
+
+
 def snapshot(state):
-    return {"mode": state.mode, "cps": state.cps, "button": state.button}
+    return {"mode": state.mode, "cps": state.cps, "button": state.button,
+            "theme": state.theme}
 
 
 def load_settings():
@@ -75,6 +110,8 @@ def load_settings():
             out["mode"] = data["mode"]
         if data.get("button") in MOUSEEVENTF:
             out["button"] = data["button"]
+        if data.get("theme") in THEMES:
+            out["theme"] = data["theme"]
         if isinstance(data.get("cps"), int):
             out["cps"] = min(MAX_CPS, max(MIN_CPS, data["cps"]))
         return out
@@ -243,8 +280,47 @@ def build_ui(state):
         pass
 
     pad = {"padx": 14}
+    style = ttk.Style(root)
     main = ttk.Frame(root, padding=(0, 12, 0, 12))
     main.pack()
+
+    # Top row: dark / light toggle
+    top = ttk.Frame(main)
+    top.pack(fill="x", padx=14, pady=(0, 8))
+    theme_btn = ttk.Button(top, width=11, cursor="hand2",
+                           command=lambda: apply_theme("light" if state.theme == "dark" else "dark"))
+    theme_btn.pack(side="right")
+
+    def apply_theme(name):
+        c = THEMES[name]
+        state.theme = name
+        style.theme_use("clam")  # the default Windows theme ignores most colours
+        root.configure(bg=c["bg"])
+        style.configure("TFrame", background=c["bg"])
+        style.configure("TLabelframe", background=c["bg"], bordercolor=c["border"])
+        style.configure("TLabelframe.Label", background=c["bg"], foreground=c["fg"])
+        style.configure("TLabel", background=c["bg"], foreground=c["fg"])
+        style.configure("Hint.TLabel", background=c["bg"], foreground=c["hint"])
+        style.configure("TRadiobutton", background=c["bg"], foreground=c["fg"],
+                        indicatorbackground=c["field"], indicatorforeground=c["fg"],
+                        focuscolor=c["bg"])
+        style.map("TRadiobutton", background=[("active", c["bg"])],
+                  foreground=[("active", c["fg"])],
+                  indicatorbackground=[("pressed", c["btn_hover"]), ("!pressed", c["field"])])
+        style.configure("TEntry", fieldbackground=c["field"], foreground=c["fg"],
+                        insertcolor=c["fg"], bordercolor=c["border"],
+                        lightcolor=c["field"], darkcolor=c["field"])
+        style.map("TEntry", bordercolor=[("focus", c["accent"])])
+        style.configure("TScale", background=c["accent"], troughcolor=c["field"],
+                        bordercolor=c["border"], lightcolor=c["accent"], darkcolor=c["accent"])
+        style.configure("TButton", background=c["btn"], foreground=c["fg"],
+                        bordercolor=c["border"], lightcolor=c["btn"], darkcolor=c["btn"],
+                        focuscolor=c["btn"], padding=4)
+        style.map("TButton", background=[("active", c["btn_hover"]), ("pressed", c["btn_hover"])],
+                  foreground=[("active", c["fg"])])
+        theme_btn.config(text="Light mode" if name == "dark" else "Dark mode")
+        if state.ui_hwnd:
+            set_titlebar_dark(state.ui_hwnd, name == "dark")
 
     def on_status():
         # Big button: starts / stops clicking in Toggle mode
@@ -321,7 +397,7 @@ def build_ui(state):
                         command=lambda: setattr(state, "button", btn_var.get())
                         ).pack(side="left", padx=(0, 12))
 
-    ttk.Label(main, justify="left", foreground="#555",
+    ttk.Label(main, justify="left", style="Hint.TLabel",
               text="Click the big button (or press F6), then move the pointer\n"
                    "off this window onto your target. It never clicks this window.\n"
                    "F6 start/stop (Toggle)   F8/F9 slower/faster   F10 switch mode   F7 quit"
@@ -330,6 +406,7 @@ def build_ui(state):
     overlay_refresh = build_overlay(root, state)
     root.update_idletasks()
     state.ui_hwnd = user32.GetParent(root.winfo_id()) or root.winfo_id()
+    apply_theme(state.theme)
 
     def refresh():
         if state.quit:
@@ -381,6 +458,7 @@ def main():
     state.cps = min(MAX_CPS, max(MIN_CPS, args.cps or saved.get("cps", 10)))
     state.mode = args.mode or saved.get("mode", "toggle")
     state.button = args.button or saved.get("button", "left")
+    state.theme = saved.get("theme") or system_theme()
     state.saved = snapshot(state)
 
     ctypes.windll.winmm.timeBeginPeriod(1)  # finer timer, steadier clicks at high CPS
