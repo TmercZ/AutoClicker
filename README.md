@@ -12,12 +12,24 @@ No third-party packages - just Python's standard library.
 - Remembers your last mode, speed and button.
 - Never clicks its own window. Moving the pointer to the top-left screen corner stops clicking.
 
-## Requirements
+## Quick install (Windows 10 / 11)
+
+1. Click **Code > Download ZIP** on GitHub and unzip it.
+2. Double-click **`install.bat`**.
+
+That's it. It finds Python (or installs it with winget if missing), copies the app to
+`%LOCALAPPDATA%\AutoClicker`, adds an **Auto Clicker** shortcut to your Desktop and Start
+menu, and launches it. To remove everything, double-click **`uninstall.bat`**.
+
+(If Windows shows a blue "protected your PC" box, click **More info > Run anyway**.
+The installer is a plain, readable script: `install.ps1`.)
+
+## Requirements (manual setup)
 
 - Windows 10 / 11
 - [Python 3.8+](https://www.python.org/downloads/) (the standard installer includes tkinter)
 
-## Run
+## Run without installing
 
 ```
 python autoclicker.py
