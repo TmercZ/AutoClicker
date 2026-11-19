@@ -31,6 +31,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 
+import sounds
 import themes
 from themes import THEMES, THEME_ORDER
 
@@ -38,7 +39,7 @@ user32 = ctypes.windll.user32
 
 DEFAULT_KEYS = {"toggle": 0x75, "quit": 0x76, "slower": 0x77, "faster": 0x78, "mode": 0x79}
 ACTIONS = ["toggle", "quit", "slower", "faster", "mode"]   # order shown in Settings
-SETTINGS_PAGES = ["themes", "keybinds", "overlay", "restore"]  # the list on the left
+SETTINGS_PAGES = ["themes", "keybinds", "overlay", "sound", "restore"]  # the list on the left
 _KEY_NAMES = {0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause", 0x14: "CapsLock",
               0x20: "Space", 0x21: "PgUp", 0x22: "PgDn", 0x23: "End", 0x24: "Home",
               0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down", 0x2D: "Insert",
@@ -81,6 +82,10 @@ class State:
     overlay_goto = None       # set by the overlay: move it to overlay_x / overlay_y
     capturing = False         # True while Settings waits for a new keybind
     keys = dict(DEFAULT_KEYS)
+    sound_enabled = True      # play a sound for every click
+    sound_volume = sounds.DEFAULT_VOLUME   # 0-100
+    sound_theme = sounds.DEFAULT_SOUND
+    sound = None              # the sound engine (sounds.ClickSound), set in main()
     ui_hwnd = 0
     dialog_hwnd = 0  # the Settings window, while it's open
     saved = None  # last settings written to disk
@@ -144,7 +149,9 @@ def snapshot(state):
     return {"mode": state.mode, "cps": state.cps, "button": state.button,
             "theme": state.theme, "overlay_x": state.overlay_x,
             "overlay_y": state.overlay_y, "overlay_locked": not state.overlay_movable,
-            "overlay_enabled": state.overlay_enabled, "keys": dict(state.keys)}
+            "overlay_enabled": state.overlay_enabled, "keys": dict(state.keys),
+            "sound_enabled": state.sound_enabled, "sound_volume": state.sound_volume,
+            "sound_theme": state.sound_theme}
 
 
 def load_settings():
@@ -167,6 +174,13 @@ def load_settings():
             out["overlay_locked"] = data["overlay_locked"]
         if isinstance(data.get("overlay_enabled"), bool):
             out["overlay_enabled"] = data["overlay_enabled"]
+        if isinstance(data.get("sound_enabled"), bool):
+            out["sound_enabled"] = data["sound_enabled"]
+        v = data.get("sound_volume")
+        if isinstance(v, int) and not isinstance(v, bool):
+            out["sound_volume"] = max(0, min(100, v))
+        if data.get("sound_theme") in sounds.SOUND_THEMES:
+            out["sound_theme"] = data["sound_theme"]
         keys = data.get("keys")
         if (isinstance(keys, dict) and set(keys) == set(DEFAULT_KEYS)
                 and all(isinstance(v, int) and not isinstance(v, bool)
@@ -283,6 +297,7 @@ def clicker_loop(state):
             tapped(vk)  # forget stale presses
     clear_presses()
     next_click = 0.0
+    prev_active = False
     while not state.quit:
         keys = dict(state.keys)
         if state.capturing:  # Settings is waiting for a new key: hotkeys do nothing
@@ -311,6 +326,12 @@ def clicker_loop(state):
             if state.active and not was:
                 next_click = time.perf_counter()
 
+        if state.active and not prev_active:       # clicking just started (any way it happens)
+            next_click = time.perf_counter()
+            if state.sound:
+                state.sound.warm()                  # open the audio device before the first click
+        prev_active = state.active
+
         if state.active and in_failsafe_corner():
             if state.mode == "toggle":
                 state.active = False
@@ -318,7 +339,16 @@ def clicker_loop(state):
             now = time.perf_counter()
             if now >= next_click:
                 click(state.button)
-                next_click = now + 1.0 / state.cps
+                if state.sound:
+                    state.sound.trigger(now)        # one sound per click, same timing
+                interval = 1.0 / state.cps
+                next_click += interval              # fixed schedule: no drift, exact CPS
+                if now - next_click > 3 * interval:   # far behind (e.g. paused): don't burst
+                    next_click = now + interval
+            elif next_click - now < 0.002:
+                while time.perf_counter() < next_click:
+                    pass                            # last ~2 ms: wait precisely
+                continue
         time.sleep(0.001)
 
 
@@ -494,6 +524,63 @@ class RetroCheck(tk.Frame):
                                   outline=T["radio_ring"] if on else T["radio_off"])
         if on:
             self.box.create_rectangle(4, 4, 12, 12, width=0, fill=T["radio_on"], outline="")
+
+
+class Knob(tk.Canvas):
+    """A round volume wheel, 0-100. Drag around it, or use the mouse wheel over it.
+    The dial sweeps 270 degrees, from lower-left (0) clockwise to lower-right (100)."""
+    SIZE = 96
+
+    def __init__(self, parent, bg, track, fill, pointer, value, command, on_release=None):
+        super().__init__(parent, width=self.SIZE, height=self.SIZE, bg=bg,
+                         highlightthickness=0, cursor="hand2")
+        self.track, self.fill, self.pointer = track, fill, pointer
+        self.value, self.command, self.on_release = value, command, on_release
+        self.bind("<ButtonPress-1>", lambda e: self._drag(e, jump=True))
+        self.bind("<B1-Motion>", lambda e: self._drag(e, jump=False))
+        self.bind("<ButtonRelease-1>", lambda e: self.on_release and self.on_release())
+        self.bind("<MouseWheel>", self._wheel)
+        self.draw()
+
+    def set(self, v):
+        self.value = max(0, min(100, int(v)))
+        self.draw()
+
+    def _change(self, v):
+        v = max(0, min(100, int(round(v))))
+        if v != self.value:
+            self.set(v)
+            self.command(self.value)
+
+    def _drag(self, e, jump):
+        c = self.SIZE / 2
+        dx, dy = e.x - c, e.y - c
+        if math.hypot(dx, dy) < 8:
+            return
+        angle = max(-135.0, min(135.0, math.degrees(math.atan2(dx, -dy))))  # 0 = straight up
+        new = (angle + 135.0) / 270.0 * 100.0
+        if not jump and abs(new - self.value) > 60:   # dragged across the gap at the bottom
+            return
+        self._change(new)
+
+    def _wheel(self, e):
+        self._change(self.value + (5 if e.delta > 0 else -5))
+        if self.on_release:
+            self.on_release()
+
+    def draw(self):
+        self.delete("all")
+        c, r = self.SIZE / 2, self.SIZE / 2 - 10
+        box = (c - r, c - r, c + r, c + r)
+        self.create_arc(*box, start=225, extent=-270, style="arc", width=9, outline=self.track)
+        if self.value > 0:
+            self.create_arc(*box, start=225, extent=-270 * self.value / 100, style="arc",
+                            width=9, outline=self.fill)
+        a = math.radians(-135 + 270 * self.value / 100)
+        sx, sy = math.sin(a), -math.cos(a)
+        self.create_line(c + sx * 8, c + sy * 8, c + sx * (r - 7), c + sy * (r - 7),
+                         width=4, fill=self.pointer, capstyle="round")
+        self.create_oval(c - 4, c - 4, c + 4, c + 4, fill=self.pointer, outline="")
 
 
 class SegBar(tk.Canvas):
@@ -836,6 +923,8 @@ def build_ui(state):
     cps_text = tk.StringVar(value=str(state.cps))
     theme_var = tk.StringVar(value=state.theme)
     ov_var = tk.BooleanVar(value=state.overlay_enabled)
+    snd_var = tk.BooleanVar(value=state.sound_enabled)
+    snd_theme_var = tk.StringVar(value=state.sound_theme)
 
     W = {}      # widgets that refresh() updates; rebuilt whenever the theme changes
     KB = {}     # keybind rows in the Settings window: action -> (key label, button)
@@ -1021,6 +1110,14 @@ def build_ui(state):
     def on_overlay_toggle():
         state.overlay_enabled = ov_var.get()
 
+    def on_sound_toggle():
+        state.sound_enabled = snd_var.get()
+
+    def on_sound_theme():
+        state.sound_theme = snd_theme_var.get()
+        if state.sound:
+            state.sound.preview(2)      # let you hear the one you just picked
+
     def restore_defaults():
         d = ctx["dialog"]
         if not messagebox.askyesno("Restore defaults", themes.CLASSIC_LABELS["restore_ask"],
@@ -1032,6 +1129,9 @@ def build_ui(state):
         state.keys = dict(DEFAULT_KEYS)
         state.overlay_enabled, state.overlay_movable = True, False
         state.overlay_x = state.overlay_y = 8
+        state.sound_enabled = True
+        state.sound_volume = sounds.DEFAULT_VOLUME
+        state.sound_theme = sounds.DEFAULT_SOUND
         state.active = False
         if state.overlay_goto:
             state.overlay_goto()
@@ -1098,7 +1198,7 @@ def build_ui(state):
 
         # ---- right: the page for the highlighted setting (fixed size so the window
         # doesn't jump around when you switch pages)
-        pw, ph = (400, 330) if kit.retro else (350, 290)
+        pw, ph = (440, 360) if kit.retro else (400, 310)
         pane = tk.Frame(row_main, bg=t["bg"], width=pw, height=ph)
         pane.pack(side="left", anchor="n", padx=(12, 0))
         pane.pack_propagate(False)
@@ -1119,6 +1219,35 @@ def build_ui(state):
             note(L["overlay_help"])
             ov_var.set(state.overlay_enabled)
             kit.check(sec, L["show_overlay"], ov_var, on_overlay_toggle).pack(anchor="w", pady=2)
+        elif page == "sound":
+            snd_var.set(state.sound_enabled)
+            snd_theme_var.set(state.sound_theme)
+            kit.check(sec, L["sound_on"], snd_var, on_sound_toggle).pack(anchor="w", pady=(2, 6))
+            cols = kit.row(sec)
+            cols.pack(fill="x")
+            left = kit.row(cols)
+            left.pack(side="left", anchor="n", padx=(0, 18))
+            if kit.retro:
+                colours = (t["seg_off"], t["seg_on"], t["fg"], t["panel"])
+            else:
+                colours = (t["border"], t["accent"], t["fg"], t["bg"])
+            vol_label = kit.label(left, f"{L['volume']} {state.sound_volume}%")
+
+            def on_volume(v):
+                state.sound_volume = v
+                vol_label.config(text=f"{L['volume']} {v}%")
+            Knob(left, colours[3], colours[0], colours[1], colours[2], state.sound_volume,
+                 on_volume, on_release=lambda: state.sound and state.sound.preview(2)
+                 ).pack()
+            vol_label.pack(pady=(2, 0))
+            kit.button(left, L["test_sound"], lambda: state.sound and state.sound.preview(4),
+                       width=8).pack(pady=(6, 0))
+            right = kit.row(cols)
+            right.pack(side="left", anchor="n")
+            kit.label(right, L["sound_theme"], accent=True).pack(anchor="w")
+            for sid in sounds.SOUND_ORDER:
+                kit.radio(right, kit.txt(sounds.SOUND_THEMES[sid][0]), snd_theme_var, sid,
+                          on_sound_theme).pack(anchor="w", pady=1)
         elif page == "keybinds":
             capturing = ctx.get("cap")
             for a in ACTIONS:
@@ -1250,6 +1379,12 @@ def main():
     state.overlay_movable = not saved.get("overlay_locked", True)
     state.overlay_enabled = saved.get("overlay_enabled", True)
     state.keys = saved.get("keys", dict(DEFAULT_KEYS))
+    state.sound_enabled = saved.get("sound_enabled", True)
+    state.sound_volume = saved.get("sound_volume", sounds.DEFAULT_VOLUME)
+    state.sound_theme = saved.get("sound_theme", sounds.DEFAULT_SOUND)
+    state.sound = sounds.ClickSound(
+        lambda: (state.sound_enabled, state.sound_volume, state.sound_theme),
+        lambda: state.quit)
     state.saved = snapshot(state)
 
     ctypes.windll.winmm.timeBeginPeriod(1)  # finer timer, steadier clicks at high CPS

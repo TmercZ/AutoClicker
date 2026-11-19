@@ -71,7 +71,7 @@ if ($Uninstall) {
 
 # ------------------------------------------------------------------ install
 Write-Host "Installing $appName..." -ForegroundColor Cyan
-$appFiles = 'autoclicker.py', 'themes.py', 'autoclicker.ico'
+$appFiles = 'autoclicker.py', 'themes.py', 'sounds.py', 'autoclicker.ico'
 foreach ($f in ($appFiles + 'fonts')) {
     if (-not (Test-Path (Join-Path $here $f))) {
         Write-Host "Missing $f next to the installer. Unzip the whole download first." -ForegroundColor Red

@@ -13,8 +13,12 @@ No third-party packages - just Python's standard library.
   - **Themes** - Classic light, Classic dark, and three 16-bit game looks: **Doom**,
     **Castlevania** and **Metroid**. Classic starts with your Windows light/dark setting.
   - **Overlay** - a check box to show or hide the ON/OFF badge.
+  - **Sound** - a click sound for every click (so you can hear that it's working and how
+    fast), a round volume wheel, and five sound themes: Classic click, 8-bit blip, Doom pistol,
+    Whip crack and Power beam. The sounds are generated in code, no audio files.
   - **Keybinds** - see every hotkey and change any of them (press the new key, Esc cancels).
   - **Restore** - one button to put every setting back to its default.
+- Exact click rate: clicks run on a fixed schedule, so 20 clicks per second really is 20.
 - Draggable ON/OFF badge: click the padlock at its end to unlock it, drag it where you like,
   click the padlock again to lock it. Locked, it's click-through, so it never gets in your way.
 - Remembers your last mode, speed, button, theme, and badge position and lock.

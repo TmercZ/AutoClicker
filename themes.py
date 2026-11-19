@@ -94,8 +94,13 @@ CLASSIC_LABELS = dict(
     overlay_help="The badge shows ON/OFF, mode and speed. Drag it to move it, and use its "
                  "padlock to lock it in place.",
     restore_help="Puts every setting back to its default: theme, mode, speed, mouse button, "
-                 "overlay and keybinds.",
+                 "overlay, keybinds and sound.",
     keybinds="Keybinds",
+    sound="Sound",
+    sound_on="Play a sound for every click",
+    volume="Volume",
+    sound_theme="Sound theme",
+    test_sound="Test",
     act_toggle="Start/Stop",
     act_quit="Close/Quit",
     act_slower="Slower",
@@ -107,7 +112,7 @@ CLASSIC_LABELS = dict(
     restore="Restore",
     restore_btn="Restore defaults",
     restore_ask="Restore ALL settings to their defaults?\n\nThis resets the theme, mode, speed, "
-                "mouse button, overlay and keybinds.",
+                "mouse button, overlay, keybinds and sound.",
 )
 
 
@@ -120,8 +125,6 @@ def retro_labels(**over):
         hold="MANUAL - HOLD MOUSE",
         ready="READY - HOLD MOUSE",
         show_overlay="SHOW THE OVERLAY",
-        restore_ask="RESTORE ALL SETTINGS TO THEIR DEFAULTS?\n\nThis resets the theme, mode, speed, "
-                    "mouse button, overlay and keybinds.",
     )
     labels.update(over)
     return labels
