@@ -71,13 +71,14 @@ if ($Uninstall) {
 
 # ------------------------------------------------------------------ install
 Write-Host "Installing $appName..." -ForegroundColor Cyan
-foreach ($f in 'autoclicker.py', 'autoclicker.ico') {
+$appFiles = 'autoclicker.py', 'themes.py', 'autoclicker.ico'
+foreach ($f in ($appFiles + 'fonts')) {
     if (-not (Test-Path (Join-Path $here $f))) {
         Write-Host "Missing $f next to the installer. Unzip the whole download first." -ForegroundColor Red
         Finish 1
     }
 }
-try { Get-ChildItem $here -File | Unblock-File } catch { }
+try { Get-ChildItem $here -File -Recurse | Unblock-File } catch { }
 
 Write-Host '[1/4] Looking for Python 3.8+ ...'
 $py = Find-Python
@@ -103,9 +104,10 @@ if (-not (Test-Path $pyw)) { $pyw = $py }
 
 Write-Host "[2/4] Copying files to $InstallDir ..."
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
-foreach ($f in 'autoclicker.py', 'autoclicker.ico') {
+foreach ($f in $appFiles) {
     Copy-Item (Join-Path $here $f) (Join-Path $InstallDir $f) -Force
 }
+Copy-Item (Join-Path $here 'fonts') $InstallDir -Recurse -Force
 $script = Join-Path $InstallDir 'autoclicker.py'
 $icon = Join-Path $InstallDir 'autoclicker.ico'
 

@@ -9,8 +9,15 @@ No third-party packages - just Python's standard library.
 - **Manual mode** - clicks repeatedly while you hold your real mouse button.
 - Adjustable speed from 1 to 100 clicks per second (slider or type a number).
 - Left, right or middle button.
-- Dark and light themes (button at the top of the window; starts with your Windows setting).
-- Remembers your last mode, speed, button and theme.
+- **Settings** (the cog at the top right):
+  - **Themes** - Classic light, Classic dark, and three 16-bit game looks: **Doom**,
+    **Castlevania** and **Metroid**. Classic starts with your Windows light/dark setting.
+  - **Overlay** - a check box to show or hide the ON/OFF badge.
+  - **Keybinds** - see every hotkey and change any of them (press the new key, Esc cancels).
+  - **Restore** - one button to put every setting back to its default.
+- Draggable ON/OFF badge: click the padlock at its end to unlock it, drag it where you like,
+  click the padlock again to lock it. Locked, it's click-through, so it never gets in your way.
+- Remembers your last mode, speed, button, theme, and badge position and lock.
 - Never clicks its own window. Moving the pointer to the top-left screen corner stops clicking.
 
 ## Quick install (Windows 10 / 11)
@@ -39,7 +46,7 @@ python autoclicker.py
 Use `pythonw autoclicker.py` to run without a console window.
 Optional start values: `python autoclicker.py --cps 20 --mode hold --button right`
 
-## Hotkeys
+## Hotkeys (defaults - change them in Settings)
 
 | Key | Action |
 |---|---|
@@ -55,6 +62,11 @@ Optional start values: `python autoclicker.py --cps 20 --mode hold --button righ
   only where it's allowed.
 - Settings are stored in `settings.json` next to the script (not tracked by git).
 
-## License
+## License and credits
 
 MIT - see [LICENSE](LICENSE).
+
+The retro themes use two pixel fonts bundled in the `fonts` folder, both under the
+SIL Open Font License 1.1 (license texts included): **Press Start 2P** (CodeMan38) and
+**VT323** (Peter Hull). They are loaded by the program only; nothing is installed on your PC.
+The theme names are tributes to classic games; this project isn't affiliated with them.
