@@ -16,6 +16,9 @@ No third-party packages - just Python's standard library.
   - **Sound** - a click sound for every click (so you can hear that it's working and how
     fast), a round volume wheel, and five sound themes: Classic click, 8-bit blip, Doom pistol,
     Whip crack and Power beam. The sounds are generated in code, no audio files.
+    Each click waits a moment for its sound so the two line up, and the sound stops the instant
+    the clicking stops. **Sound sync** fine-tunes this for your speakers or headphones:
+    raise it if you hear the sound after the click, lower it if before.
   - **Keybinds** - see every hotkey and change any of them (press the new key, Esc cancels).
   - **Restore** - one button to put every setting back to its default.
 - Exact click rate: clicks run on a fixed schedule, so 20 clicks per second really is 20.

@@ -4,6 +4,7 @@ __pycache__/
 
 # Per-user settings written by the app (each person gets their own)
 settings.json
+hotkeys.log
 
 # Editor / OS noise
 .vscode/

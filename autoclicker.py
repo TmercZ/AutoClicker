@@ -24,6 +24,7 @@ import ctypes
 import json
 import math
 import os
+import sys
 import threading
 from ctypes import wintypes
 import time
@@ -85,6 +86,7 @@ class State:
     sound_enabled = True      # play a sound for every click
     sound_volume = sounds.DEFAULT_VOLUME   # 0-100
     sound_theme = sounds.DEFAULT_SOUND
+    sound_sync_ms = sounds.DEFAULT_SYNC_MS   # delay allowed for the sound card (lines sound up with clicks)
     sound = None              # the sound engine (sounds.ClickSound), set in main()
     ui_hwnd = 0
     dialog_hwnd = 0  # the Settings window, while it's open
@@ -151,7 +153,7 @@ def snapshot(state):
             "overlay_y": state.overlay_y, "overlay_locked": not state.overlay_movable,
             "overlay_enabled": state.overlay_enabled, "keys": dict(state.keys),
             "sound_enabled": state.sound_enabled, "sound_volume": state.sound_volume,
-            "sound_theme": state.sound_theme}
+            "sound_theme": state.sound_theme, "sound_sync_ms": state.sound_sync_ms}
 
 
 def load_settings():
@@ -181,6 +183,9 @@ def load_settings():
             out["sound_volume"] = max(0, min(100, v))
         if data.get("sound_theme") in sounds.SOUND_THEMES:
             out["sound_theme"] = data["sound_theme"]
+        v = data.get("sound_sync_ms")
+        if isinstance(v, int) and not isinstance(v, bool):
+            out["sound_sync_ms"] = max(0, min(sounds.MAX_SYNC_MS, v))
         keys = data.get("keys")
         if (isinstance(keys, dict) and set(keys) == set(DEFAULT_KEYS)
                 and all(isinstance(v, int) and not isinstance(v, bool)
@@ -287,68 +292,174 @@ def over_ui(state):
     return False
 
 
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hotkeys.log")
+
+
+def debug_log(msg):
+    """Append a line to hotkeys.log (a few events per minute at most; capped at ~100 KB).
+    It records what the hotkeys did, to help track down problems."""
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 100_000:
+            os.remove(LOG_PATH)
+        now = time.time()
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S', time.localtime(now))}.{int(now * 1000) % 1000:03d}"
+                    f"  {msg}\n")
+    except OSError:
+        pass
+
+
+def foreground_info():
+    """Name of the program in front, and whether Windows hides its keys from us."""
+    try:
+        k32, adv = ctypes.windll.kernel32, ctypes.windll.advapi32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                                   wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        adv.OpenProcessToken.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.POINTER(ctypes.c_void_p)]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "nothing"
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        proc = k32.OpenProcess(0x1000, False, pid.value)        # query limited information
+        if not proc:
+            return f"process {pid.value} (can't be opened - higher privilege?)"
+        buf, size = ctypes.create_unicode_buffer(520), wintypes.DWORD(520)
+        k32.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size))
+        token = ctypes.c_void_p()
+        higher = "" if adv.OpenProcessToken(proc, 8, ctypes.byref(token)) else \
+            "  [HIGHER PRIVILEGE: Windows may hide keys from this program]"
+        if token:
+            k32.CloseHandle(token)
+        k32.CloseHandle(proc)
+        return os.path.basename(buf.value) + higher
+    except Exception as exc:
+        return f"unknown ({exc})"
+
+
 def step(cps):
     return 1 if cps < 20 else 5
 
 
 def clicker_loop(state):
+    # A key press is spotted by watching the key go from "up" to "down". (Windows also
+    # offers a "pressed since last asked" flag, but it is shared by every program on the
+    # PC, so another program checking the same key can swallow our press.)
+    last_down = {}
+
+    def edge(vk):
+        down = held(vk)
+        pressed = down and not last_down.get(vk, False)
+        last_down[vk] = down
+        return pressed
+
     def clear_presses():
         for vk in state.keys.values():
-            tapped(vk)  # forget stale presses
+            last_down[vk] = held(vk)  # a key already down doesn't count as a new press
     clear_presses()
-    next_click = 0.0
-    prev_active = False
+    debug_log(f"clicker started; keys={ {a: vk_name(v) for a, v in state.keys.items()} }; "
+              f"running as administrator={bool(ctypes.windll.shell32.IsUserAnAdmin())}")
+    next_click = sound_next = 0.0
+    last_interval = last_sync = 0.0
+    prev_active = was_performing = False
+    wait_since = None
     while not state.quit:
         keys = dict(state.keys)
         if state.capturing:  # Settings is waiting for a new key: hotkeys do nothing
             clear_presses()
             time.sleep(0.01)
             continue
-        if tapped(keys["quit"]):
+        if edge(keys["quit"]):
+            debug_log("quit key pressed")
             state.quit = True
             break
-        if tapped(keys["slower"]):
+        if edge(keys["slower"]):
             state.cps = max(MIN_CPS, state.cps - step(state.cps - 1))
-        if tapped(keys["faster"]):
+        if edge(keys["faster"]):
             state.cps = min(MAX_CPS, state.cps + step(state.cps))
-        if tapped(keys["mode"]):
+        if edge(keys["mode"]):
             state.mode = "hold" if state.mode == "toggle" else "toggle"
             state.active = False
-            tapped(keys["toggle"])
+            last_down[keys["toggle"]] = held(keys["toggle"])
+            debug_log(f"mode key pressed -> {state.mode}")
 
         if state.mode == "toggle":
-            if tapped(keys["toggle"]):
+            if edge(keys["toggle"]):
                 state.active = not state.active
                 next_click = time.perf_counter()
+                debug_log(f"{vk_name(keys['toggle'])} pressed -> clicking "
+                          f"{'ON' if state.active else 'OFF'} | window in front: {foreground_info()}")
         else:
             was = state.active
             state.active = state.phys[state.button]
             if state.active and not was:
                 next_click = time.perf_counter()
 
-        if state.active and not prev_active:       # clicking just started (any way it happens)
-            next_click = time.perf_counter()
-            if state.sound:
-                state.sound.warm()                  # open the audio device before the first click
+        if state.active != prev_active:
+            debug_log(f"clicking is now {'ON' if state.active else 'OFF'} (mode {state.mode})")
         prev_active = state.active
 
-        if state.active and in_failsafe_corner():
-            if state.mode == "toggle":
-                state.active = False
-        elif state.active and not over_ui(state):
-            now = time.perf_counter()
-            if now >= next_click:
-                click(state.button)
-                if state.sound:
-                    state.sound.trigger(now)        # one sound per click, same timing
-                interval = 1.0 / state.cps
-                next_click += interval              # fixed schedule: no drift, exact CPS
-                if now - next_click > 3 * interval:   # far behind (e.g. paused): don't burst
-                    next_click = now + interval
-            elif next_click - now < 0.002:
-                while time.perf_counter() < next_click:
-                    pass                            # last ~2 ms: wait precisely
-                continue
+        corner = state.active and in_failsafe_corner()
+        if corner and state.mode == "toggle":
+            state.active = False
+            debug_log("turned OFF by the top-left corner failsafe")
+        performing = state.active and not corner and not over_ui(state)
+        snd = state.sound
+        now = time.perf_counter()
+
+        if not performing:
+            if was_performing and snd:
+                snd.cancel(now)                     # clicks stopped: stop the sound with them
+            was_performing = False
+            wait_since = None
+            time.sleep(0.001)
+            continue
+
+        # Sound lines up with the click by making the click WAIT for it: each click is handed
+        # to the sound engine `sync` seconds before it is performed (see sounds.py).
+        sound_on = bool(snd) and state.sound_enabled and state.sound_volume > 0
+        sync = snd.sync_delay() if sound_on else 0.0
+        interval = 1.0 / state.cps
+        if not was_performing:                      # clicking just started (or resumed)
+            if sound_on and not snd.is_ready():     # wait (briefly) until the sound card is playing
+                if wait_since is None:
+                    wait_since = now
+                    snd.warm()
+                if now - wait_since < 0.5:
+                    time.sleep(0.001)
+                    continue
+            wait_since = None
+            was_performing = True
+            next_click = now + sync                 # the first click waits for its sound
+            sound_next = next_click
+            last_interval, last_sync = interval, sync
+            if snd:
+                snd.warm()                          # open the audio device
+        elif interval != last_interval or sync != last_sync:
+            if snd:
+                snd.cancel(now)                     # speed / sync changed: re-hand-over the sounds
+            sound_next = next_click
+            last_interval, last_sync = interval, sync
+        if sound_on:
+            while sound_next - sync <= now:
+                snd.trigger(sound_next)             # "a click will happen at this time"
+                sound_next += interval
+        if now >= next_click:
+            click(state.button)
+            next_click += interval                  # fixed schedule: no drift, exact CPS
+            if now - next_click > 3 * interval:     # far behind (loop was starved): don't burst
+                next_click = now + interval
+                if snd:
+                    snd.cancel(now)
+                sound_next = next_click
+        elif next_click - now < 0.002:
+            while time.perf_counter() < next_click:
+                time.sleep(0)                       # last ~2 ms: wait precisely, but let
+            continue                                # the sound thread run meanwhile
         time.sleep(0.001)
 
 
@@ -1132,6 +1243,7 @@ def build_ui(state):
         state.sound_enabled = True
         state.sound_volume = sounds.DEFAULT_VOLUME
         state.sound_theme = sounds.DEFAULT_SOUND
+        state.sound_sync_ms = sounds.DEFAULT_SYNC_MS
         state.active = False
         if state.overlay_goto:
             state.overlay_goto()
@@ -1198,7 +1310,7 @@ def build_ui(state):
 
         # ---- right: the page for the highlighted setting (fixed size so the window
         # doesn't jump around when you switch pages)
-        pw, ph = (440, 360) if kit.retro else (400, 310)
+        pw, ph = (440, 430) if kit.retro else (400, 330)
         pane = tk.Frame(row_main, bg=t["bg"], width=pw, height=ph)
         pane.pack(side="left", anchor="n", padx=(12, 0))
         pane.pack_propagate(False)
@@ -1248,6 +1360,26 @@ def build_ui(state):
             for sid in sounds.SOUND_ORDER:
                 kit.radio(right, kit.txt(sounds.SOUND_THEMES[sid][0]), snd_theme_var, sid,
                           on_sound_theme).pack(anchor="w", pady=1)
+
+            # Sound sync: how long the sound card takes. Raise it if you hear the sound AFTER
+            # the click, lower it if you hear it BEFORE.
+            sync_row = kit.row(sec)
+            sync_row.pack(fill="x", pady=(8, 0))
+            unit = kit.txt("ms")
+            sync_label = kit.label(sync_row, f"{L['sound_sync']} {state.sound_sync_ms} {unit}",
+                                   accent=True)
+
+            def nudge(delta):
+                state.sound_sync_ms = max(0, min(sounds.MAX_SYNC_MS, state.sound_sync_ms + delta))
+                sync_label.config(text=f"{L['sound_sync']} {state.sound_sync_ms} {unit}")
+                if state.sound:
+                    state.sound.preview(3)
+            kit.button(sync_row, "-", lambda: nudge(-5), width=2).pack(side="left")
+            sync_label.pack(side="left", padx=10)
+            kit.button(sync_row, "+", lambda: nudge(5), width=2).pack(side="left")
+            hint = kit.label(sec, L["sound_sync_help"])
+            hint.config(wraplength=pw - 70, justify="left")
+            hint.pack(anchor="w", pady=(4, 0))
         elif page == "keybinds":
             capturing = ctx.get("cap")
             for a in ACTIONS:
@@ -1382,12 +1514,15 @@ def main():
     state.sound_enabled = saved.get("sound_enabled", True)
     state.sound_volume = saved.get("sound_volume", sounds.DEFAULT_VOLUME)
     state.sound_theme = saved.get("sound_theme", sounds.DEFAULT_SOUND)
+    state.sound_sync_ms = saved.get("sound_sync_ms", sounds.DEFAULT_SYNC_MS)
     state.sound = sounds.ClickSound(
-        lambda: (state.sound_enabled, state.sound_volume, state.sound_theme),
+        lambda: (state.sound_enabled, state.sound_volume, state.sound_theme,
+                 state.sound_sync_ms),
         lambda: state.quit)
     state.saved = snapshot(state)
 
     ctypes.windll.winmm.timeBeginPeriod(1)  # finer timer, steadier clicks at high CPS
+    sys.setswitchinterval(0.0005)           # threads (clicker, sound, window) hand over quickly
     threading.Thread(target=mouse_hook_thread, args=(state,), daemon=True).start()
     threading.Thread(target=clicker_loop, args=(state,), daemon=True).start()
     try:
