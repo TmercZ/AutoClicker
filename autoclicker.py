@@ -89,13 +89,39 @@ class State:
     sound_sync_ms = sounds.DEFAULT_SYNC_MS   # delay allowed for the sound card (lines sound up with clicks)
     sound = None              # the sound engine (sounds.ClickSound), set in main()
     ui_hwnd = 0
+    hook_thread_id = 0  # Windows thread id of the mouse-hook thread (so it can be stopped)
+    hook_installed = False  # True only while the mouse is being watched (Manual mode)
     dialog_hwnd = 0  # the Settings window, while it's open
     saved = None  # last settings written to disk
     # Physical (real, not injected) mouse button state, kept by the mouse hook
     phys = {"left": False, "right": False, "middle": False}
 
 
-SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+# Bundled files (icon, fonts) live next to this file - or inside the .exe's own folder.
+RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def _data_dir():
+    """Where settings.json and hotkeys.log go. Running as a script: next to it.
+    Running as the packaged .exe: %LOCALAPPDATA%\\AutoClicker, so it works from any folder and
+    survives moving or updating the program. AUTOCLICKER_DATA overrides (used for testing)."""
+    override = os.environ.get("AUTOCLICKER_DATA")
+    if override:
+        folder = override
+    elif getattr(sys, "frozen", False):
+        folder = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                              "AutoClicker")
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError:
+        pass
+    return folder
+
+
+DATA_DIR = _data_dir()
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
 
 def system_theme():
@@ -241,12 +267,34 @@ def mouse_hook_thread(state):
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
     cb = HOOKPROC(proc)  # keep a reference so it isn't garbage collected
-    hook = user32.SetWindowsHookExW(WH_MOUSE_LL, cb, None, 0)
-    if not hook:
-        return
+    user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+    user32.MsgWaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.c_void_p, wintypes.BOOL,
+                                                 wintypes.DWORD, wintypes.DWORD]
+    state.hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+    hook = None
     msg = wintypes.MSG()
-    while not state.quit and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-        pass
+    try:
+        while not state.quit:
+            # The mouse is only watched while Manual mode is selected. In Toggle mode no hook
+            # is installed at all, so the program adds no work to your mouse movement.
+            want = state.mode == "hold"
+            if want and not hook:
+                hook = user32.SetWindowsHookExW(WH_MOUSE_LL, cb, None, 0)
+            elif not want and hook:
+                user32.UnhookWindowsHookEx(hook)
+                hook = None
+                for name in state.phys:
+                    state.phys[name] = False
+            state.hook_installed = bool(hook)
+            # Wait for mouse events (the hook is called while we wait) or for the next check.
+            # shutdown() posts WM_QUIT to wake this up at once.
+            user32.MsgWaitForMultipleObjects(0, None, False, 100, 0x4FF)   # QS_ALLINPUT
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):    # PM_REMOVE
+                pass
+    finally:
+        if hook:
+            user32.UnhookWindowsHookEx(hook)   # stop watching the mouse
+        state.hook_installed = False
 
 
 def tapped(vk):
@@ -292,7 +340,7 @@ def over_ui(state):
     return False
 
 
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hotkeys.log")
+LOG_PATH = os.path.join(DATA_DIR, "hotkeys.log")
 
 
 def debug_log(msg):
@@ -412,11 +460,13 @@ def clicker_loop(state):
         now = time.perf_counter()
 
         if not performing:
-            if was_performing and snd:
-                snd.cancel(now)                     # clicks stopped: stop the sound with them
+            if was_performing:
+                sys.setswitchinterval(0.005)        # idle: Python's relaxed default
+                if snd:
+                    snd.cancel(now)                 # clicks stopped: stop the sound with them
             was_performing = False
             wait_since = None
-            time.sleep(0.001)
+            time.sleep(0.005)       # idle: look at the keys 200 times a second (plenty, and cheap)
             continue
 
         # Sound lines up with the click by making the click WAIT for it: each click is handed
@@ -434,6 +484,7 @@ def clicker_loop(state):
                     continue
             wait_since = None
             was_performing = True
+            sys.setswitchinterval(0.0005)           # clicking: threads (clicker, sound) hand over fast
             next_click = now + sync                 # the first click waits for its sound
             sound_next = next_click
             last_interval, last_sync = interval, sync
@@ -931,7 +982,7 @@ def build_overlay(root, state):
     def toggle_lock():
         state.overlay_movable = not state.overlay_movable
         label.config(cursor="fleur" if state.overlay_movable else "")
-        poll()
+        poll(force=True)
 
     lock = PixelIcon(ov, themes.LOCK_CLOSED, 2, "#ffffff", "#000000", command=toggle_lock)
     lock.pack(side="left", padx=(0, 9))
@@ -951,22 +1002,40 @@ def build_overlay(root, state):
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                               (st | WS_EX_TRANSPARENT) if on else (st & ~WS_EX_TRANSPARENT))
 
-    def poll():
-        """Locked badge lets clicks through, except while the pointer is on the padlock."""
+    chain = {"id": None, "n": 0}
+
+    def poll(force=False):
+        """Locked badge lets clicks through, except while the pointer is on the padlock.
+        Checked every 20 ms while the pointer is near the badge (or it's unlocked) and only
+        every 100 ms otherwise, so it costs almost nothing while you work elsewhere."""
         if state.quit:
             return
+        try:
+            if chain["id"] is not None:
+                ov.after_cancel(chain["id"])      # never run two checking loops at once
+                chain["id"] = None
+        except tk.TclError:
+            return
+        chain["n"] += 1
+        delay = 100
         if not state.overlay_enabled:      # hidden: nothing to click
             state.overlay_icon_rect = None
+            delay = 200
         else:
-            l, t = lock.winfo_rootx() - 5, lock.winfo_rooty() - 5
-            state.overlay_icon_rect = (l, t, l + lock.winfo_width() + 10,
-                                       t + lock.winfo_height() + 10)
+            r = state.overlay_icon_rect
             px, py = cursor_pos()
-            over_lock = (state.overlay_icon_rect[0] <= px <= state.overlay_icon_rect[2]
-                         and state.overlay_icon_rect[1] <= py <= state.overlay_icon_rect[3])
+            near = (r is not None and r[0] - 150 <= px <= r[2] + 150
+                    and r[1] - 150 <= py <= r[3] + 150)
+            if force or near or state.overlay_movable or r is None or chain["n"] % 10 == 0:
+                l, t = lock.winfo_rootx() - 5, lock.winfo_rooty() - 5
+                r = state.overlay_icon_rect = (l, t, l + lock.winfo_width() + 10,
+                                               t + lock.winfo_height() + 10)
+            over_lock = r[0] <= px <= r[2] and r[1] <= py <= r[3]
             set_click_through(not state.overlay_movable and not over_lock)
+            if near or state.overlay_movable:
+                delay = 20
         try:
-            ov.after(15, poll)
+            chain["id"] = ov.after(delay, poll)
         except tk.TclError:
             pass
 
@@ -987,7 +1056,11 @@ def build_overlay(root, state):
     def goto():
         nx, ny = clamp_to_screen(state.overlay_x, state.overlay_y)
         ov.geometry(f"+{nx}+{ny}")
+        ov.update_idletasks()
+        poll(force=True)
     state.overlay_goto = goto
+
+    drawn = {}
 
     def refresh():
         if not state.overlay_enabled:
@@ -1002,11 +1075,14 @@ def build_overlay(root, state):
         mode = "TOGGLE" if state.mode == "toggle" else "MANUAL"
         status = "ON" if state.active else "OFF"
         bg = T["ov_on"] if state.active else T["ov_off"]
-        label.config(text=f"CLICKER {status}  |  {mode}  |  {state.cps} CPS", font=font,
-                     bg=bg, fg=T["ov_fg"])
-        ov.configure(bg=bg)
-        lock.update_look(grid=themes.LOCK_OPEN if state.overlay_movable else themes.LOCK_CLOSED,
-                         color=T["ov_fg"], bg=bg)
+        look = (f"CLICKER {status}  |  {mode}  |  {state.cps} CPS", font, bg, T["ov_fg"],
+                state.overlay_movable)
+        if look != drawn.get("look"):          # only redraw when something actually changed
+            drawn["look"] = look
+            label.config(text=look[0], font=font, bg=bg, fg=T["ov_fg"])
+            ov.configure(bg=bg)
+            lock.update_look(grid=themes.LOCK_OPEN if state.overlay_movable else themes.LOCK_CLOSED,
+                             color=T["ov_fg"], bg=bg)
         if state.overlay_movable:
             state.overlay_x, state.overlay_y = ov.winfo_x(), ov.winfo_y()
 
@@ -1022,7 +1098,7 @@ def build_ui(state):
     root.title("Auto Clicker")
     root.resizable(False, False)
     root.attributes("-topmost", True)
-    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autoclicker.ico")
+    icon = os.path.join(RESOURCE_DIR, "autoclicker.ico")
     try:
         root.iconbitmap(icon)
     except tk.TclError:
@@ -1482,8 +1558,11 @@ def build_ui(state):
         if W["hint"].cget("text") != hint:   # keys changed, e.g. by Restore defaults
             W["hint"].config(text=hint)
         bg = t["status_on_bg"] if state.active else t["status_off_bg"]
-        W["status"].config(text=text, bg=bg, activebackground=bg, fg=t["status_fg"],
-                           activeforeground=t["status_fg"], cursor=cursor)
+        look = (text, bg, t["status_fg"], cursor)
+        if look != W.get("status_look"):          # only redraw when something actually changed
+            W["status_look"] = look
+            W["status"].config(text=text, bg=bg, activebackground=bg, fg=t["status_fg"],
+                               activeforeground=t["status_fg"], cursor=cursor)
         overlay_refresh()
         root.after(50, refresh)
 
@@ -1522,15 +1601,32 @@ def main():
     state.saved = snapshot(state)
 
     ctypes.windll.winmm.timeBeginPeriod(1)  # finer timer, steadier clicks at high CPS
-    sys.setswitchinterval(0.0005)           # threads (clicker, sound, window) hand over quickly
-    threading.Thread(target=mouse_hook_thread, args=(state,), daemon=True).start()
-    threading.Thread(target=clicker_loop, args=(state,), daemon=True).start()
+    workers =[threading.Thread(target=mouse_hook_thread, args=(state,), daemon=True),
+               threading.Thread(target=clicker_loop, args=(state,), daemon=True)]
+    for w in workers:
+        w.start()
     try:
         build_ui(state).mainloop()
     except KeyboardInterrupt:
         pass
     state.quit = True
     save_if_changed(state)
+    shutdown(state, workers)
+
+
+def shutdown(state, workers):
+    """Stop everything this program started, so nothing keeps running once it is closed:
+    the mouse hook, the clicker thread, the sound thread (and its audio device) and the
+    faster Windows timer."""
+    state.quit = True
+    tid = getattr(state, "hook_thread_id", 0)
+    if tid:
+        user32.PostThreadMessageW(tid, 0x0012, 0, 0)    # WM_QUIT: lets the hook thread finish
+    if state.sound:
+        state.sound.close()
+    for w in workers:
+        w.join(1.0)
+    ctypes.windll.winmm.timeEndPeriod(1)
 
 
 if __name__ == "__main__":

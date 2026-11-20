@@ -39,6 +39,27 @@ menu, and launches it. To remove everything, double-click **`uninstall.bat`**.
 (If Windows shows a blue "protected your PC" box, click **More info > Run anyway**.
 The installer is a plain, readable script: `install.ps1`.)
 
+## Download the program (no Python needed)
+
+Open the **Releases** page of this repository, download **`AutoClicker-windows.zip`**, unzip it,
+and double-click **`AutoClicker.exe`**. Keep the unzipped folder together (the program needs the
+files next to it). There is nothing to install and nothing to uninstall: delete the folder.
+
+Windows SmartScreen or your antivirus may warn about it, because the program is unsigned and
+it sends mouse clicks. Click **More info > Run anyway**. All of the source is in this repository,
+and you can build the program yourself by double-clicking `build_exe.bat`.
+
+## Nothing runs in the background
+
+- It is a normal window program with a single process: no services, no startup entries, no
+  scheduled tasks, and it never starts another program.
+- Close the window (or press the quit key, F7 by default) and every part of it stops: the
+  clicker, the mouse watching, the sound and the audio device. Nothing is left running.
+- While you are in Toggle mode it doesn't watch the mouse at all. The mouse is only watched
+  while Manual mode is selected.
+- Settings are saved in `%LOCALAPPDATA%\AutoClicker` (the downloaded program) or next to the
+  script (the Python version). Delete that folder to remove them.
+
 ## Requirements (manual setup)
 
 - Windows 10 / 11

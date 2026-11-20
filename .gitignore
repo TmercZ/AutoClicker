@@ -6,6 +6,12 @@ __pycache__/
 settings.json
 hotkeys.log
 
+# Build output for the .exe (see build_exe.ps1)
+build/
+build_env/
+dist/
+*.spec
+
 # Editor / OS noise
 .vscode/
 .idea/

@@ -8,8 +8,11 @@ program only - nothing is installed on the PC.
 import ctypes
 import os
 import re
+import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# Where the bundled files (fonts, icon) are: next to this file, or inside the .exe's own
+# folder when the program has been packaged with PyInstaller.
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FONT_DIR = os.path.join(HERE, "fonts")
 PS = "Press Start 2P"   # chunky headings / buttons
 VT = "VT323"            # body text

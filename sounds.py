@@ -202,6 +202,14 @@ class ClickSound:
         self._lock = threading.Lock()
 
     # ---- called from other threads
+    def close(self, timeout=1.0):
+        """Program is quitting (should_stop() is now True): end the audio thread and let it
+        release the sound device."""
+        self.wake.set()
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
     def is_ready(self):
         """True once the sound card is playing (so the first click's sound will be on time).
         Always True if audio can't be used, so clicking never waits for nothing."""
